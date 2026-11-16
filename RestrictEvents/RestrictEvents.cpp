@@ -68,7 +68,6 @@ static size_t cpuFindSize;
 static uint8_t cpuReplPatch[CpuSignatureWords * sizeof(uint32_t) + 1];
 static size_t cpuReplSize;
 
-static bool needsCpuNamePatch;
 static bool needsUnlockCoreCount;
 static uint8_t findUnlockCoreCount[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static uint8_t replUnlockCoreCount[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x1C };
@@ -222,9 +221,9 @@ struct RestrictEventsPolicy {
 	}
 
 	/**
-	 * Return true when CPU brand string patch is needed
+	 * Prepare the CPU brand string when patching is enabled
 	 */
-	static bool needsCpuNamePatch() {
+	static void prepareCpuNamePatch() {
 		// Default to true on non-Intel
 		uint32_t b = 0, c = 0, d = 0;
 		CPUInfo::getCpuid(0, 0, nullptr, &b, &c, &d);
@@ -235,7 +234,7 @@ struct RestrictEventsPolicy {
 			DBGLOG("rev", "read revcpu override from NVRAM - %d", patchCpu);
 		else
 			DBGLOG("rev", "using CPUID-based revcpu value - %d", patchCpu);
-		if (patchCpu == 0) return false;
+		if (patchCpu == 0) return;
 
 		uint32_t patch[CpuSignatureWords] {};
 		if (PE_parse_boot_argn("revcpuname", patch, sizeof(patch))) {
@@ -252,13 +251,12 @@ struct RestrictEventsPolicy {
 		char *brandStr = reinterpret_cast<char *>(&patch[0]);
 		brandStr[sizeof(patch) - 1] = '\0';
 		while (brandStr[0] == ' ') brandStr++;
-		if (brandStr[0] == '\0') return false;
+		if (brandStr[0] == '\0') return;
 		auto len = strlen(brandStr);
 		memcpy(&cpuReplPatch[1], brandStr, len);
 		cpuReplSize = len + 2;
 
 		DBGLOG("rev", "requested to patch CPU name to %s", brandStr);
-		return true;
 	}
 
 	static void getBlockedProcesses(BaseDeviceInfo *info) {
@@ -447,6 +445,12 @@ struct RestrictEventsPolicy {
 				break;
 		}
 
+		// The next string in the shared cache may start immediately after the match.
+		if (cpuReplSize > cpuFindSize) {
+			cpuReplSize = cpuFindSize;
+			cpuReplPatch[cpuReplSize - 1] = '\0';
+		}
+
 		DBGLOG("rev", "chosen %s patch for %u core CPU", cpuFindPatch + 1, cc);
 	}
 
@@ -504,66 +508,68 @@ PluginConfiguration ADDPR(config) {
 	KernelVersion::Tahoe,
 	[]() {
 		DBGLOG("rev", "restriction policy plugin loaded");
+#ifdef DEBUG
 		verboseProcessLogging = checkKernelArgument("-revproc");
+#endif
 		auto di = BaseDeviceInfo::get();
 		RestrictEventsPolicy::getBlockedProcesses(&di);
 		RestrictEventsPolicy::processEnableUIPatch(&di);
-		restrictEventsPolicy.policy.registerPolicy();
+		if (procBlacklist[0] != nullptr || verboseProcessLogging)
+			restrictEventsPolicy.policy.registerPolicy();
 		revassetIsSet = enableAssetPatching;
 		revsbvmmIsSet = enableSbvmmPatching;
 
 		if ((lilu.getRunMode() & LiluAPI::RunningNormal) != 0 || (lilu.getRunMode() & LiluAPI::AllowInstallerRecovery) != 0) {
-			if (enableMemoryUiPatching | enablePciUiPatching) {
-				// Rename existing values to invalid ones to avoid matching.
-				if (strcmp(di.modelIdentifier, "MacPro7,1") == 0) {
-					// on 13.0 MacPro7,1 string literal is inlined, but "MacPro7," will do the matching.
-					modelFindPatch = "MacPro7,";
-					modelReplPatch = "HacPro7,";
-					// partial matching, thus exclude '\0'.
-					modelFindSize  = sizeof("MacPro7,") - 1;
-					DBGLOG("rev", "detected MP71");
-				} else if (strncmp(di.modelIdentifier, "MacBookAir", strlen("MacBookAir")) == 0) {
-					needsMemPatch = true;
-					modelFindPatch = "MacBookAir";
-					modelReplPatch = "HacBookAir";
-					modelFindSize  = sizeof("MacBookAir");
-					DBGLOG("rev", "detected MBA");
-				} else if (strncmp(di.modelIdentifier, "MacBookPro10", strlen("MacBookPro10")) == 0) {
-					needsMemPatch = true;
-					modelFindPatch = "MacBookPro10";
-					modelReplPatch = "HacBookPro10";
-					modelFindSize  = sizeof("MacBookPro10");
-					DBGLOG("rev", "detected MBP10");
-				}
-
-				if (modelFindPatch != nullptr) {
-					binPathSystemInformation = getKernelVersion() >= KernelVersion::Catalina ? binPathSystemInformationCatalina : binPathSystemInformationLegacy;
-				}
+			// Rename existing values to invalid ones to avoid matching.
+			if (enablePciUiPatching && strcmp(di.modelIdentifier, "MacPro7,1") == 0) {
+				// on 13.0 MacPro7,1 string literal is inlined, but "MacPro7," will do the matching.
+				modelFindPatch = "MacPro7,";
+				modelReplPatch = "HacPro7,";
+				// partial matching, thus exclude '\0'.
+				modelFindSize  = sizeof("MacPro7,") - 1;
+				DBGLOG("rev", "detected MP71");
+			} else if (enableMemoryUiPatching && strncmp(di.modelIdentifier, "MacBookAir", strlen("MacBookAir")) == 0) {
+				needsMemPatch = true;
+				modelFindPatch = "MacBookAir";
+				modelReplPatch = "HacBookAir";
+				modelFindSize  = sizeof("MacBookAir");
+				DBGLOG("rev", "detected MBA");
+			} else if (enableMemoryUiPatching && strncmp(di.modelIdentifier, "MacBookPro10", strlen("MacBookPro10")) == 0) {
+				needsMemPatch = true;
+				modelFindPatch = "MacBookPro10";
+				modelReplPatch = "HacBookPro10";
+				modelFindSize  = sizeof("MacBookPro10");
+				DBGLOG("rev", "detected MBP10");
 			}
 
-			needsCpuNamePatch = enableCpuNamePatching ? RestrictEventsPolicy::needsCpuNamePatch() : false;
-			if (modelFindPatch != nullptr || needsCpuNamePatch || enableDiskArbitrationPatching ||
-				(getKernelVersion() >= KernelVersion::Monterey ||
-				(getKernelVersion() == KernelVersion::BigSur && getKernelMinorVersion() >= 4))) {
+			if (modelFindPatch != nullptr) {
+				binPathSystemInformation = getKernelVersion() >= KernelVersion::Catalina ? binPathSystemInformationCatalina : binPathSystemInformationLegacy;
+			}
+
+			if (enableCpuNamePatching)
+				RestrictEventsPolicy::prepareCpuNamePatch();
+			if ((lilu.getRunMode() & LiluAPI::RunningNormal) != 0 &&
+				(modelFindPatch != nullptr || cpuReplSize > 0 || enableDiskArbitrationPatching)) {
 				lilu.onPatcherLoadForce([](void *user, KernelPatcher &patcher) {
-					if ((lilu.getRunMode() & LiluAPI::RunningNormal) != 0) {
-						if (needsCpuNamePatch) RestrictEventsPolicy::calculatePatchedBrandString();
-						KernelPatcher::RouteRequest csRoute =
-						getKernelVersion() >= KernelVersion::BigSur ?
-						KernelPatcher::RouteRequest("_cs_validate_page", RestrictEventsPolicy::csValidatePageBigSur, orgCsValidateFunc) :
-						(getKernelVersion() >= KernelVersion::Sierra ?
-						 KernelPatcher::RouteRequest("_cs_validate_range", RestrictEventsPolicy::csValidateRangeSierra, orgCsValidateFunc) :
-						 KernelPatcher::RouteRequest("_cs_validate_page", RestrictEventsPolicy::csValidatePageMountainLion, orgCsValidateFunc));
-						if (getKernelVersion() < KernelVersion::Sierra) {
-							vnodePagerOpsKernel = reinterpret_cast<void *>(patcher.solveSymbol(KernelPatcher::KernelID, "_vnode_pager_ops"));
-							if (!vnodePagerOpsKernel)
-								SYSLOG("rev", "failed to solve _vnode_pager_ops");
-						}
-						
-						if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &csRoute, 1))
-							SYSLOG("rev", "failed to route cs validation pages");
+					if (cpuReplSize > 0) RestrictEventsPolicy::calculatePatchedBrandString();
+					KernelPatcher::RouteRequest csRoute =
+					getKernelVersion() >= KernelVersion::BigSur ?
+					KernelPatcher::RouteRequest("_cs_validate_page", RestrictEventsPolicy::csValidatePageBigSur, orgCsValidateFunc) :
+					(getKernelVersion() >= KernelVersion::Sierra ?
+					 KernelPatcher::RouteRequest("_cs_validate_range", RestrictEventsPolicy::csValidateRangeSierra, orgCsValidateFunc) :
+					 KernelPatcher::RouteRequest("_cs_validate_page", RestrictEventsPolicy::csValidatePageMountainLion, orgCsValidateFunc));
+					if (getKernelVersion() < KernelVersion::Sierra) {
+						vnodePagerOpsKernel = reinterpret_cast<void *>(patcher.solveSymbol(KernelPatcher::KernelID, "_vnode_pager_ops"));
+						if (!vnodePagerOpsKernel)
+							SYSLOG("rev", "failed to solve _vnode_pager_ops");
 					}
-					// Perform regardless of Normal vs Installer
+					if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &csRoute, 1))
+						SYSLOG("rev", "failed to route cs validation pages");
+				});
+			}
+
+			if (revsbvmmIsSet || revassetIsSet || enableF16cPatching) {
+				lilu.onPatcherLoadForce([](void *user, KernelPatcher &patcher) {
 					if ((getKernelVersion() >= KernelVersion::Monterey ||
 						(getKernelVersion() == KernelVersion::BigSur && getKernelMinorVersion() >= 4)) &&
 						(revsbvmmIsSet || revassetIsSet))

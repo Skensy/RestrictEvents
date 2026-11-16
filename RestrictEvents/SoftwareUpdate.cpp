@@ -173,10 +173,10 @@ static mach_vm_address_t org_sysctl_f16c;
 static int my_sysctl_f16c(__unused struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req) {
 	// Strip F16C bit from arg1
 	// Ref: https://github.com/apple-oss-distributions/xnu/blob/xnu-8020.101.4/bsd/kern/kern_mib.c#L935-L946
-	int mask = (uint64_t) (uintptr_t) arg1 & ~kHasF16C;
+	constexpr uintptr_t keepMask = ~static_cast<uintptr_t>(kHasF16C);
+	static_assert((keepMask >> 32) == UINT32_MAX, "Preserve the upper CPU capability bits");
 
-	// Convert back
-	arg1 = (void *) (uintptr_t) mask;
+	arg1 = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(arg1) & keepMask);
 	return FunctionCast(my_sysctl_f16c, org_sysctl_f16c)(oidp, arg1, arg2, req);
 }
 

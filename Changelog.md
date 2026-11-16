@@ -1,5 +1,10 @@
 RestrictEvents Changelog
 ========================
+#### v1.1.8 (local fork)
+- Skip process and page-validation hooks when their configured work is empty.
+- Limit CPU name replacement to the matched label and preserve upper CPU capability bits when disabling F16C.
+- Apply PCI and memory UI options only to their respective models.
+
 #### v1.1.6
 - Added constants for macOS 26 support
 
