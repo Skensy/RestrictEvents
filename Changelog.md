@@ -1,5 +1,12 @@
 RestrictEvents Changelog
 ========================
+#### v1.1.9 (local fork)
+- Preserve the kernel validation result on macOS Sierra through Catalina.
+- Publish the original sysctl handlers before enabling the VMM and F16C hooks.
+- Match complete boot and NVRAM options and honor explicit UI options alongside `auto`.
+- Skip shared-cache path checks when no shared-cache patch applies.
+- Limit archive cleanup to the ZIP for the current build.
+
 #### v1.1.8 (local fork)
 - Skip process and page-validation hooks when their configured work is empty.
 - Limit CPU name replacement to the matched label and preserve upper CPU capability bits when disabling F16C.

@@ -140,7 +140,8 @@ struct RestrictEventsPolicy {
 					DBGLOG("rev", "patched unreadable disk case in DiskArbitrationAgent");
 					return;
 				}
-			} else if (UserPatcher::matchSharedCachePath(path)) {
+			} else if ((cpuReplSize > 0 || (needsMemPatch && getKernelVersion() >= KernelVersion::Yosemite)) &&
+				UserPatcher::matchSharedCachePath(path)) {
 				// Model check and CPU name may exist in the same page in AppleSystemInfo.
 				if (needsMemPatch && getKernelVersion() >= KernelVersion::Yosemite) {
 					if (UNLIKELY(KernelPatcher::findAndReplace(const_cast<void *>(data), size, memFindPatch, sizeof(memFindPatch), memReplPatch, sizeof(memFindPatch)))) {
@@ -172,9 +173,10 @@ struct RestrictEventsPolicy {
 	/**
 	 *  Handler to patch userspace for Sierra to Catalina.
 	 */
-	static void csValidateRangeSierra(vnode_t vp, memory_object_t pager, memory_object_offset_t offset, const void *data, vm_size_t size, unsigned *result) {
-		FunctionCast(csValidateRangeSierra, orgCsValidateFunc)(vp, pager, offset, data, size, result);
+	static boolean_t csValidateRangeSierra(vnode_t vp, memory_object_t pager, memory_object_offset_t offset, const void *data, vm_size_t size, unsigned *tainted) {
+		boolean_t validated = FunctionCast(csValidateRangeSierra, orgCsValidateFunc)(vp, pager, offset, data, size, tainted);
 		performReplacements(vp, data, size);
+		return validated;
 	}
 
 	/**
@@ -259,22 +261,38 @@ struct RestrictEventsPolicy {
 		DBGLOG("rev", "requested to patch CPU name to %s", brandStr);
 	}
 
+	static bool hasOption(const char *list, const char *option) {
+		const size_t length = strlen(option);
+		while (*list) {
+			while (*list == ' ' || *list == '\t') ++list;
+			const char *start = list;
+			while (*list && *list != ',') ++list;
+			const char *end = list;
+			while (end > start && (end[-1] == ' ' || end[-1] == '\t')) --end;
+			if (static_cast<size_t>(end - start) == length && memcmp(start, option, length) == 0)
+				return true;
+			if (*list) ++list;
+		}
+		return false;
+	}
+
 	static void getBlockedProcesses(BaseDeviceInfo *info) {
 		// Updates procBlacklist with list of processes to block
-		char duip[128] { "auto" };
-		if (PE_parse_boot_argn("revblock", duip, sizeof(duip))) {
+		char value[128] {};
+		if (PE_parse_boot_argn("revblock", value, sizeof(value))) {
 			DBGLOG("rev", "read revblock from boot-args");
-		} else if (readNvramVariable(NVRAM_PREFIX(LILU_VENDOR_GUID, "revblock"), u"revblock", &EfiRuntimeServices::LiluVendorGuid, duip, sizeof(duip))) {
+		} else if (readNvramVariable(NVRAM_PREFIX(LILU_VENDOR_GUID, "revblock"), u"revblock", &EfiRuntimeServices::LiluVendorGuid, value, sizeof(value))) {
 			DBGLOG("rev", "read revblock from NVRAM");
+		} else {
+			strlcpy(value, "auto", sizeof(value));
 		}
 
-		char *value = reinterpret_cast<char *>(&duip[0]);
-		value[sizeof(duip) - 1] = '\0';
+		value[sizeof(value) - 1] = '\0';
 		size_t i = 0;
 
 		// Disable notification prompts for mismatched memory configuration on MacPro7,1
 		if (strcmp(info->modelIdentifier, "MacPro7,1") == 0) {
-			if (strstr(value, "pci", strlen("pci")) || strstr(value, "auto", strlen("auto"))) {
+			if (hasOption(value, "pci") || hasOption(value, "auto")) {
 				if (getKernelVersion() >= KernelVersion::Catalina) {
 					DBGLOG("rev", "disabling PCIe & memory notifications");
 					procBlacklist[i++] = (char *)"/System/Library/CoreServices/ExpansionSlotNotification";
@@ -284,7 +302,7 @@ struct RestrictEventsPolicy {
 		}
 
 		// MacBookPro9,1 and MacBookPro10,1 GMUX fails to switch with 'displaypolicyd' active in Big Sur and newer
-		if (strstr(value, "gmux", strlen("gmux"))) {
+		if (hasOption(value, "gmux")) {
 			if (getKernelVersion() >= KernelVersion::BigSur) {
 				DBGLOG("rev", "disabling displaypolicyd");
 				procBlacklist[i++] = (char *)"/usr/libexec/displaypolicyd";
@@ -292,7 +310,7 @@ struct RestrictEventsPolicy {
 		}
 
 		// Metal 1 GPUs will hard crash when 'mediaanalysisd' is active on Ventura and newer
-		if (strstr(value, "media", strlen("media"))) {
+		if (hasOption(value, "media")) {
 			if (getKernelVersion() >= KernelVersion::Ventura) {
 				DBGLOG("rev", "disabling mediaanalysisd");
 				procBlacklist[i++] = (char *)"/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd";
@@ -340,46 +358,28 @@ struct RestrictEventsPolicy {
 	 * Retrieve which system UI is to be enabled
 	 */
 	static void processEnableUIPatch(BaseDeviceInfo *info) {
-		char duip[128] { "auto" };
-		if (PE_parse_boot_argn("revpatch", duip, sizeof(duip))) {
+		char value[128] {};
+		if (PE_parse_boot_argn("revpatch", value, sizeof(value))) {
 			DBGLOG("rev", "read revpatch from boot-args");
-		} else if (readNvramVariable(NVRAM_PREFIX(LILU_VENDOR_GUID, "revpatch"), u"revpatch", &EfiRuntimeServices::LiluVendorGuid, duip, sizeof(duip))) {
+		} else if (readNvramVariable(NVRAM_PREFIX(LILU_VENDOR_GUID, "revpatch"), u"revpatch", &EfiRuntimeServices::LiluVendorGuid, value, sizeof(value))) {
 			DBGLOG("rev", "read revpatch from NVRAM");
+		} else {
+			strlcpy(value, "auto", sizeof(value));
 		}
 
-		char *value = reinterpret_cast<char *>(&duip[0]);
-		value[sizeof(duip) - 1] = '\0';
+		value[sizeof(value) - 1] = '\0';
 
-		if (strstr(value, "memtab", strlen("memtab"))) {
-			enableMemoryUiPatching = true;
-		}
-		if (strstr(value, "pci", strlen("pci"))) {
-			enablePciUiPatching = true;
-		}
-		if (strstr(value, "cpuname", strlen("cpuname"))) {
-			enableCpuNamePatching = true;
-		}
-		if (strstr(value, "diskread", strlen("diskread"))) {
-			enableDiskArbitrationPatching = true;
-		}
-		if (strstr(value, "asset", strlen("asset"))) {
-			enableAssetPatching = true;
-		}
-		if (strstr(value, "sbvmm", strlen("sbvmm"))) {
-			enableSbvmmPatching = true;
-		}
-		if (strstr(value, "f16c", strlen("f16c"))) {
-			enableF16cPatching = true;
-		}
-		if (strstr(value, "auto", strlen("auto"))) {
-			// Do not enable Memory and PCI UI patching on real Macs
-			// Reference: https://github.com/acidanthera/bugtracker/issues/2046
-			enableMemoryUiPatching = info->firmwareVendor != DeviceInfo::FirmwareVendor::Apple;
-			enablePciUiPatching = info->firmwareVendor != DeviceInfo::FirmwareVendor::Apple;
-			enableCpuNamePatching = true;
-		}
+		const bool automatic = hasOption(value, "auto");
+		const bool autoModelUi = automatic && info->firmwareVendor != DeviceInfo::FirmwareVendor::Apple;
+		enableMemoryUiPatching = autoModelUi || hasOption(value, "memtab");
+		enablePciUiPatching = autoModelUi || hasOption(value, "pci");
+		enableCpuNamePatching = automatic || hasOption(value, "cpuname");
+		enableDiskArbitrationPatching = hasOption(value, "diskread");
+		enableAssetPatching = hasOption(value, "asset");
+		enableSbvmmPatching = hasOption(value, "sbvmm");
+		enableF16cPatching = hasOption(value, "f16c");
 
-		DBGLOG("rev", "revpatch to enable %s", duip);
+		DBGLOG("rev", "revpatch to enable %s", value);
 	}
 
 	/**

@@ -181,47 +181,36 @@ static int my_sysctl_f16c(__unused struct sysctl_oid *oidp, void *arg1, int arg2
 }
 
 
-void rerouteHvVmm(KernelPatcher &patcher) {
-	auto sysctl_children = reinterpret_cast<sysctl_oid_list *>(patcher.solveSymbol(KernelPatcher::KernelID, "_sysctl__children"));
-	if (!sysctl_children) {
-		SYSLOG("supd", "failed to resolve _sysctl__children");
-		return;
-	}
-	
-	// WARN: sysctl_children access should be locked. Unfortunately the lock is not exported.
-	sysctl_oid *vmm_present = sysctl_by_name(sysctl_children, "kern.hv_vmm_present");
-	if (!vmm_present) {
-		SYSLOG("supd", "failed to resolve kern.hv_vmm_present sysctl");
-		return;
-	}
-	
-	org_sysctl_vmm_present = patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(vmm_present->oid_handler), reinterpret_cast<mach_vm_address_t>(my_sysctl_vmm_present), true);
-	if (!org_sysctl_vmm_present) {
-		SYSLOG("supd", "failed to route kern.hv_vmm_present sysctl");
+static void routeSysctl(KernelPatcher &patcher, const char *name, sysctl_handler_t handler, mach_vm_address_t &original) {
+	auto children = reinterpret_cast<sysctl_oid_list *>(patcher.solveSymbol(KernelPatcher::KernelID, "_sysctl__children"));
+	if (!children) {
+		SYSLOG("supd", "failed to resolve _sysctl__children for %s", name);
 		patcher.clearError();
 		return;
+	}
+
+	// The sysctl tree lock is private to XNU.
+	auto oid = sysctl_by_name(children, name);
+	if (!oid || !oid->oid_handler) {
+		SYSLOG("supd", "failed to resolve %s sysctl handler", name);
+		return;
+	}
+
+	// Lilu publishes the original handler before activating the route.
+	KernelPatcher::RouteRequest route {nullptr, handler, original};
+	route.from = reinterpret_cast<mach_vm_address_t>(oid->oid_handler);
+	patcher.clearError();
+	if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &route, 1) ||
+		patcher.getError() != KernelPatcher::Error::NoError || !original) {
+		SYSLOG("supd", "failed to route %s sysctl", name);
+		patcher.clearError();
 	}
 }
 
+void rerouteHvVmm(KernelPatcher &patcher) {
+	routeSysctl(patcher, "kern.hv_vmm_present", my_sysctl_vmm_present, org_sysctl_vmm_present);
+}
+
 void reroutef16c(KernelPatcher &patcher) {
-	auto sysctl_children = reinterpret_cast<sysctl_oid_list *>(patcher.solveSymbol(KernelPatcher::KernelID, "_sysctl__children"));
-	if (!sysctl_children) {
-		SYSLOG("supd", "failed to resolve _sysctl__children");
-		return;
-	}
-	
-	// WARN: sysctl_children access should be locked. Unfortunately the lock is not exported.
-	sysctl_oid *f16c = sysctl_by_name(sysctl_children, "hw.optional.f16c");
-	if (!f16c) {
-		SYSLOG("supd", "failed to resolve hw.optional.f16c sysctl");
-		return;
-	}
-
-	org_sysctl_f16c = patcher.routeFunction(reinterpret_cast<mach_vm_address_t>(f16c->oid_handler), reinterpret_cast<mach_vm_address_t>(my_sysctl_f16c), true);
-
-	if (!org_sysctl_f16c) {
-		SYSLOG("supd", "failed to route hw.optional.f16c sysctl");
-		patcher.clearError();
-		return;
-	}
+	routeSysctl(patcher, "hw.optional.f16c", my_sysctl_f16c, org_sysctl_f16c);
 }
